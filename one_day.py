@@ -82,6 +82,10 @@ class OneDayApp:
         self.in_menu = True
         self.current_phase = 1  # 1: walk to bench, 2: rest, 3: walk to end
         
+        # Total time tracking for restart screen
+        self.total_start_time = 0  # When the app/session started
+        self.total_elapsed_time = 0  # Total time since app started
+        
         # Room to walk transition system
         self.transition_phase = "room"  # room -> standing -> walking -> window -> game
         self.transition_progress = 0.0
@@ -313,6 +317,28 @@ class OneDayApp:
                 self.current_activity = "sitting"
                 self.activity_start_time = current_time
                 self.activity_duration = random.randint(5, 15)  # Sit normally for 5-15 seconds
+    
+    def update_post_timer_activities(self, current_time):
+        """Update activities after timer has finished - extremely relaxed pace"""
+        if not self.is_resting:
+            return
+            
+        activity_elapsed = (current_time - self.activity_start_time) / 1000
+        
+        # Check if current activity is finished
+        if activity_elapsed >= self.activity_duration:
+            # End current activity
+            if self.current_activity == "looking_up":
+                self.looking_up = False
+            
+            # Start new activity with very low probability for extremely relaxed pace
+            if random.random() < 0.04:  # 4% chance to start new activity (much lower than 8%)
+                self.start_random_activity(current_time)
+            else:
+                # Just sit normally for very long periods
+                self.current_activity = "sitting"
+                self.activity_start_time = current_time
+                self.activity_duration = random.randint(45, 90)  # Sit normally for 45-90 seconds (much longer)
     
     
     
@@ -1144,6 +1170,10 @@ class OneDayApp:
         self.start_time = pygame.time.get_ticks()
         self.walk_duration = self.input_duration
         
+        # Initialize total time tracking when first game starts
+        if self.total_start_time == 0:
+            self.total_start_time = pygame.time.get_ticks()
+        
         # Reset character position and game state
         self.character_x = -self.character_frames[0].get_width()
         self.is_resting = False
@@ -1539,26 +1569,27 @@ class OneDayApp:
                         self.handle_time_input_click(event.pos)
             
             elif event.type == KEYDOWN:
-                if self.in_menu and self.input_active:
-                    # Handle text input when input is active
+                if self.in_menu:
                     if event.key == K_RETURN or event.key == K_KP_ENTER:
-                        # Start walking when Enter is pressed
+                        # Start walking when Enter is pressed (regardless of input_active state)
                         if self.start_walking():
                             pass  # Game started successfully
-                    elif event.key == K_BACKSPACE:
-                        self.handle_backspace()
-                    elif event.key == K_ESCAPE:
-                        self.input_active = False
-                    else:
-                        # Handle character input
-                        if event.unicode.isdigit():
-                            self.handle_text_input(event.unicode)
+                    elif self.input_active:
+                        # Handle text input only when input is active
+                        if event.key == K_BACKSPACE:
+                            self.handle_backspace()
+                        elif event.key == K_ESCAPE:
+                            self.input_active = False
+                        else:
+                            # Handle character input
+                            if event.unicode.isdigit():
+                                self.handle_text_input(event.unicode)
                 
                 elif event.key == K_SPACE and not self.game_started and not self.in_menu:
                     self.game_started = True
                     self.start_time = pygame.time.get_ticks()
                 elif event.key == K_r and self.game_finished:
-                    # Reset the game
+                    # Reset the game but keep total time tracking
                     self.in_menu = True
                     self.game_started = False
                     self.game_finished = False
@@ -1578,6 +1609,7 @@ class OneDayApp:
                     self.camera_y = 0
                     self.walking_bob = 0
                     self.window_scale = 0.3
+                    # DON'T reset total_start_time and total_elapsed_time - keep tracking total session time
                 # Window size shortcuts (1-5 keys) - keep for convenience
                 elif event.key >= K_1 and event.key <= K_5 and self.in_menu and not self.input_active:
                     size_index = event.key - K_1
@@ -1589,6 +1621,11 @@ class OneDayApp:
     
     def update(self):
         """Update game state"""
+        # Always update total elapsed time if we have started tracking
+        if self.total_start_time > 0:
+            current_time = pygame.time.get_ticks()
+            self.total_elapsed_time = (current_time - self.total_start_time) / 1000  # Convert to seconds
+        
         # Update room transition if active
         if self.transition_phase != "room" and self.transition_phase != "game":
             current_time = pygame.time.get_ticks()
@@ -1601,68 +1638,81 @@ class OneDayApp:
             return
         
         # Normal game update (only when transition is complete)
-        if self.game_started and not self.game_finished:
+        if self.game_started:
             # Update timer
             current_time = pygame.time.get_ticks()
             self.elapsed_time = (current_time - self.start_time) / 1000  # Convert to seconds
             
-            # Phase-based movement logic
-            if self.current_phase == 1:  # Phase 1: Walk to bench (first minute)
-                # Move character towards bench
-                self.character_x += self.walk_speed
-                
-                # Check if reached bench or first minute is up
-                if self.character_x >= self.bench_x or self.elapsed_time >= 60:
-                    self.character_x = self.bench_x  # Snap to bench position
-                    self.is_resting = True
-                    self.rest_start_time = current_time
-                    self.current_phase = 2
-                    # Calculate rest duration (total time - 2 minutes for walking)
-                    self.rest_duration = self.walk_duration - 120
-                    print(f"🪑 Phase 1->2: Reached bench at {self.elapsed_time:.1f}s, starting rest for {self.rest_duration:.1f}s")
+            # Continue updating activities even after game is finished for relaxation
+            if self.game_finished and self.is_resting:
+                self.update_post_timer_activities(current_time)  # Use slower-paced activities
             
-            elif self.current_phase == 2:  # Phase 2: Rest on bench (middle time)
-                rest_elapsed = (current_time - self.rest_start_time) / 1000
-                time_remaining = self.walk_duration - self.elapsed_time
+            # Only do movement logic if game is not finished
+            if not self.game_finished:
+                # Phase-based movement logic
+                if self.current_phase == 1:  # Phase 1: Walk to bench (first minute)
+                    # Move character towards bench
+                    self.character_x += self.walk_speed
+                    
+                    # Check if reached bench or first minute is up
+                    if self.character_x >= self.bench_x or self.elapsed_time >= 60:
+                        self.character_x = self.bench_x  # Snap to bench position
+                        self.is_resting = True
+                        self.rest_start_time = current_time
+                        self.current_phase = 2
+                        # Calculate rest duration (total time - 2 minutes for walking)
+                        self.rest_duration = self.walk_duration - 120
+                        print(f"🪑 Phase 1->2: Reached bench at {self.elapsed_time:.1f}s, starting rest for {self.rest_duration:.1f}s")
                 
-                # Debug info every 10 seconds
-                if int(rest_elapsed) % 10 == 0 and int(rest_elapsed) > 0 and abs(rest_elapsed - int(rest_elapsed)) < 0.1:
-                    print(f"😴 Phase 2: Resting {rest_elapsed:.1f}s elapsed, {time_remaining:.1f}s remaining")
+                elif self.current_phase == 2:  # Phase 2: Rest on bench (middle time)
+                    rest_elapsed = (current_time - self.rest_start_time) / 1000
+                    time_remaining = self.walk_duration - self.elapsed_time
+                    
+                    # Debug info every 10 seconds
+                    if int(rest_elapsed) % 10 == 0 and int(rest_elapsed) > 0 and abs(rest_elapsed - int(rest_elapsed)) < 0.1:
+                        print(f"😴 Phase 2: Resting {rest_elapsed:.1f}s elapsed, {time_remaining:.1f}s remaining")
+                    
+                    # Update resting activities
+                    self.update_resting_activities(current_time)
+                    
+                    # Start first activity when resting begins
+                    if rest_elapsed < 1 and self.current_activity == "sitting":
+                        self.start_random_activity(current_time)
+                    
+                    # Check if rest time is over (1 minute left in walk)
+                    if time_remaining <= 60:
+                        self.is_resting = False
+                        self.current_phase = 3
+                        self.current_activity = "sitting"  # Reset activity
+                        # Calculate speed for final minute (bench to end)
+                        remaining_distance = self.WINDOW_WIDTH - self.bench_x
+                        self.walk_speed = remaining_distance / (60 * self.FPS)
+                        print(f"🚶 Phase 2->3: Rest over at {self.elapsed_time:.1f}s, final walk begins")
+                        print(f"   Distance: {remaining_distance}, Speed: {self.walk_speed:.4f}")
                 
-                # Update resting activities
-                self.update_resting_activities(current_time)
-                
-                # Start first activity when resting begins
-                if rest_elapsed < 1 and self.current_activity == "sitting":
-                    self.start_random_activity(current_time)
-                
-                # Check if rest time is over (1 minute left in walk)
-                if time_remaining <= 60:
-                    self.is_resting = False
-                    self.current_phase = 3
-                    self.current_activity = "sitting"  # Reset activity
-                    # Calculate speed for final minute (bench to end)
-                    remaining_distance = self.WINDOW_WIDTH - self.bench_x
-                    self.walk_speed = remaining_distance / (60 * self.FPS)
-                    print(f"🚶 Phase 2->3: Rest over at {self.elapsed_time:.1f}s, final walk begins")
-                    print(f"   Distance: {remaining_distance}, Speed: {self.walk_speed:.4f}")
-            
-            elif self.current_phase == 3:  # Phase 3: Walk to end (last minute)
-                # Move character towards end
-                self.character_x += self.walk_speed
-                
-                # Debug info
-                if int(self.elapsed_time) % 10 == 0 and abs(self.elapsed_time - int(self.elapsed_time)) < 0.1:
-                    remaining_time = self.walk_duration - self.elapsed_time
-                    print(f"🏃 Phase 3: Final walk {remaining_time:.1f}s remaining, position: {self.character_x:.1f}")
+                elif self.current_phase == 3:  # Phase 3: Walk to end (last minute)
+                    # Move character towards end
+                    self.character_x += self.walk_speed
+                    
+                    # Debug info
+                    if int(self.elapsed_time) % 10 == 0 and abs(self.elapsed_time - int(self.elapsed_time)) < 0.1:
+                        remaining_time = self.walk_duration - self.elapsed_time
+                        print(f"🏃 Phase 3: Final walk {remaining_time:.1f}s remaining, position: {self.character_x:.1f}")
             
             # Update seasonal objects
             self.update_seasonal_objects()
             
-            # Check if character reached the end
-            if self.character_x >= self.WINDOW_WIDTH:
+            # Check if walk duration is complete
+            if self.elapsed_time >= self.walk_duration:
                 self.game_finished = True
                 self.elapsed_time = self.walk_duration  # Ensure timer shows exactly the set duration
+                # Move character back to bench for continued relaxation
+                self.character_x = self.bench_x
+                self.is_resting = True
+                self.current_activity = "sitting"
+                # Initialize with long sitting period instead of immediate activity
+                self.activity_start_time = current_time
+                self.activity_duration = random.randint(30, 60)  # Start with 30-60 seconds of quiet sitting
     
     def draw_sky_gradient(self):
         """Draw sky with gradient based on time of day"""
@@ -1873,83 +1923,46 @@ class OneDayApp:
                 # Update animation frame
                 self.current_frame = (self.current_frame + 1) % (self.animation_speed * len(self.character_frames))
         
-        # Draw timer with background
-        minutes = int(self.elapsed_time) // 60
-        seconds = int(self.elapsed_time) % 60
+        # Create combined info panel for right side (unified format)
+        info_lines = []
         
-        # Format timer text
-        if minutes > 0:
-            timer_text = f"{minutes}:{seconds:02d}"
-        else:
-            timer_text = f"{seconds} sec"
-            
-        timer_surface = self.font_small.render(timer_text, True, (0, 0, 0))
+        # Add current date
+        date_text = f"{self.current_datetime.year}/{self.current_datetime.month:02d}/{self.current_datetime.day:02d}"
+        info_lines.append(date_text)
         
-        # Draw timer background
-        timer_bg_rect = pygame.Rect(self.WINDOW_WIDTH - 110, 5, timer_surface.get_width() + 20, timer_surface.get_height() + 10)
-        pygame.draw.rect(self.screen, (255, 255, 255, 180), timer_bg_rect)
-        pygame.draw.rect(self.screen, (100, 100, 100), timer_bg_rect, 1)
+        # Add total elapsed time in MM:SS format (unified with completion screen)
+        if self.total_elapsed_time > 0:
+            total_minutes = int(self.total_elapsed_time) // 60
+            total_seconds = int(self.total_elapsed_time) % 60
+            total_text = f"Total: {total_minutes:02d}:{total_seconds:02d}"
+            info_lines.append(total_text)
         
-        # Draw timer text
-        self.screen.blit(timer_surface, (self.WINDOW_WIDTH - 100, 10))
+        # Calculate panel size
+        max_width = 0
+        line_height = 25
+        for line in info_lines:
+            line_surface = self.font_small.render(line, True, (0, 0, 0))
+            max_width = max(max_width, line_surface.get_width())
         
-        # Draw total duration with background
-        total_minutes = self.walk_duration // 60
-        total_seconds = self.walk_duration % 60
-        if total_seconds == 0:
-            total_text = f"Total: {total_minutes} min"
-        else:
-            total_text = f"Total: {total_minutes}:{total_seconds:02d}"
+        panel_width = max_width + 20
+        panel_height = len(info_lines) * line_height + 10
+        panel_x = self.WINDOW_WIDTH - panel_width - 10
+        panel_y = 10
         
-        total_surface = self.font_small.render(total_text, True, (0, 0, 0))
+        # Draw single background panel
+        panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
+        pygame.draw.rect(self.screen, (255, 255, 255, 180), panel_rect)
+        pygame.draw.rect(self.screen, (100, 100, 100), panel_rect, 1)
         
-        # Draw total background
-        total_bg_rect = pygame.Rect(self.WINDOW_WIDTH - 160, 35, total_surface.get_width() + 20, total_surface.get_height() + 10)
-        pygame.draw.rect(self.screen, (255, 255, 255, 180), total_bg_rect)
-        pygame.draw.rect(self.screen, (100, 100, 100), total_bg_rect, 1)
-        
-        # Draw total text
-        self.screen.blit(total_surface, (self.WINDOW_WIDTH - 150, 40))
-        
-        # Draw rest status if resting
-        if self.is_resting:
-            rest_minutes = int(self.rest_duration - (pygame.time.get_ticks() - self.rest_start_time) / 1000) // 60
-            rest_seconds = int(self.rest_duration - (pygame.time.get_ticks() - self.rest_start_time) / 1000) % 60
-            
-            if rest_minutes > 0:
-                rest_text = f"Resting: {rest_minutes}:{rest_seconds:02d} remaining"
-            else:
-                rest_text = f"Resting: {rest_seconds} sec remaining"
-                
-            rest_surface = self.font_small.render(rest_text, True, (0, 0, 0))
-            
-            # Draw rest background
-            rest_bg_rect = pygame.Rect(15, 5, rest_surface.get_width() + 10, rest_surface.get_height() + 10)
-            pygame.draw.rect(self.screen, (255, 255, 255, 180), rest_bg_rect)
-            pygame.draw.rect(self.screen, (100, 100, 100), rest_bg_rect, 1)
-            
-            # Draw rest text
-            self.screen.blit(rest_surface, (20, 10))
-        
-        # Draw progress bar
-        if self.game_started and not self.game_finished:
-            progress_percent = self.elapsed_time / self.walk_duration
-            progress_bar_width = 200
-            progress_bar_height = 10
-            progress_bar_x = self.WINDOW_WIDTH - progress_bar_width - 20
-            progress_bar_y = 70
-            
-            # Draw background
-            pygame.draw.rect(self.screen, (100, 100, 100), 
-                            (progress_bar_x, progress_bar_y, progress_bar_width, progress_bar_height))
-            
-            # Draw progress
-            progress_width = int(progress_bar_width * progress_percent)
-            pygame.draw.rect(self.screen, (100, 200, 100), 
-                            (progress_bar_x, progress_bar_y, progress_width, progress_bar_height))
+        # Draw all text lines within the panel
+        for i, line in enumerate(info_lines):
+            line_surface = self.font_small.render(line, True, (0, 0, 0))
+            text_x = panel_x + 10
+            text_y = panel_y + 5 + i * line_height
+            self.screen.blit(line_surface, (text_x, text_y))
     
     def draw_completion_screen(self):
-        """Draw completion screen"""
+        """Draw completion screen with total elapsed time"""
         # Create text surface for restart instruction only
         restart_text = self.font_small.render("Press R to restart", True, (0, 0, 0))
         
@@ -1969,64 +1982,43 @@ class OneDayApp:
         self.screen.blit(restart_text, (self.WINDOW_WIDTH // 2 - restart_text.get_width() // 2, 
                                       self.WINDOW_HEIGHT // 2))
         
-        # Draw total duration with background
-        total_minutes = self.walk_duration // 60
-        total_seconds = self.walk_duration % 60
-        if total_seconds == 0:
-            total_text = f"Total: {total_minutes} min"
-        else:
-            total_text = f"Total: {total_minutes}:{total_seconds:02d}"
+        # Create combined info panel for right side
+        info_lines = []
         
-        total_surface = self.font_small.render(total_text, True, (0, 0, 0))
+        # Add current date
+        date_text = f"{self.current_datetime.year}/{self.current_datetime.month:02d}/{self.current_datetime.day:02d}"
+        info_lines.append(date_text)
         
-        # Draw total background
-        total_bg_rect = pygame.Rect(self.WINDOW_WIDTH - 160, 35, total_surface.get_width() + 20, total_surface.get_height() + 10)
-        pygame.draw.rect(self.screen, (255, 255, 255, 180), total_bg_rect)
-        pygame.draw.rect(self.screen, (100, 100, 100), total_bg_rect, 1)
+        # Add total session time if available
+        if self.total_elapsed_time > 0:
+            total_minutes = int(self.total_elapsed_time) // 60
+            total_seconds = int(self.total_elapsed_time) % 60
+            total_text = f"Total: {total_minutes:02d}:{total_seconds:02d}"
+            info_lines.append(total_text)
         
-        # Draw total text
-        self.screen.blit(total_surface, (self.WINDOW_WIDTH - 150, 40))
+        # Calculate panel size
+        max_width = 0
+        line_height = 25
+        for line in info_lines:
+            line_surface = self.font_small.render(line, True, (0, 0, 0))
+            max_width = max(max_width, line_surface.get_width())
         
-        # Draw rest status if resting
-        if self.is_resting:
-            rest_minutes = int(self.rest_duration - (pygame.time.get_ticks() - self.rest_start_time) / 1000) // 60
-            rest_seconds = int(self.rest_duration - (pygame.time.get_ticks() - self.rest_start_time) / 1000) % 60
-            
-            if rest_minutes > 0:
-                rest_text = f"Resting: {rest_minutes}:{rest_seconds:02d} remaining"
-            else:
-                rest_text = f"Resting: {rest_seconds} sec remaining"
-                
-            rest_surface = self.font_small.render(rest_text, True, (0, 0, 0))
-            
-            # Draw rest background
-            rest_bg_rect = pygame.Rect(15, 5, rest_surface.get_width() + 10, rest_surface.get_height() + 10)
-            pygame.draw.rect(self.screen, (255, 255, 255, 180), rest_bg_rect)
-            pygame.draw.rect(self.screen, (100, 100, 100), rest_bg_rect, 1)
-            
-            # Draw rest text
-            self.screen.blit(rest_surface, (20, 10))
+        panel_width = max_width + 20
+        panel_height = len(info_lines) * line_height + 10
+        panel_x = self.WINDOW_WIDTH - panel_width - 10
+        panel_y = 10
         
-        # Draw progress bar
-        if self.game_started and not self.game_finished:
-            progress_percent = self.elapsed_time / self.walk_duration  # Based on time, not position
-            progress_bar_width = 200
-            progress_bar_height = 10
-            progress_bar_x = self.WINDOW_WIDTH - progress_bar_width - 20
-            progress_bar_y = 70
-            
-            # Draw background
-            pygame.draw.rect(self.screen, (100, 100, 100), 
-                            (progress_bar_x, progress_bar_y, progress_bar_width, progress_bar_height))
-            
-            # Draw progress
-            pygame.draw.rect(self.screen, (100, 200, 100), 
-                            (progress_bar_x, progress_bar_y, 
-                             int(progress_bar_width * progress_percent), progress_bar_height))
-            
-            # Draw border
-            pygame.draw.rect(self.screen, (50, 50, 50), 
-                            (progress_bar_x, progress_bar_y, progress_bar_width, progress_bar_height), 1)
+        # Draw single background panel
+        panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
+        pygame.draw.rect(self.screen, (255, 255, 255, 180), panel_rect)
+        pygame.draw.rect(self.screen, (100, 100, 100), panel_rect, 1)
+        
+        # Draw all text lines within the panel
+        for i, line in enumerate(info_lines):
+            line_surface = self.font_small.render(line, True, (0, 0, 0))
+            text_x = panel_x + 10
+            text_y = panel_y + 5 + i * line_height
+            self.screen.blit(line_surface, (text_x, text_y))
     
     def run(self):
         """Main game loop"""
